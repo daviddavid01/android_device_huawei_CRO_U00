@@ -5,9 +5,18 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    # Always use the latest host runner for performance and reliability
+    runs-on: ubuntu-latest
     
+    # Running directly inside an Ubuntu 16.04 container to protect older 2015 dependencies
+    container:
+      image: ubuntu:16.04
+
     steps:
+    - name: Prepare Container Environment
+      run: |
+        apt-get update && apt-get install -y git curl tar tzdata
+
     - name: Checkout Device Tree
       uses: actions/checkout@v4
       with:
@@ -15,24 +24,25 @@ jobs:
 
     - name: Install Build Dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib \
+        apt-get update
+        # Installs native 2015 requirements including lib32 tools, split python components, and make flags
+        apt-get install -y bc bison build-essential ccache curl flex g++-multilib \
           gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
           lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
           libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
-          zip zlib1g-dev python-is-python3 python3
+          zip zlib1g-dev python python-crypto libcrypto++-dev
 
     - name: Install Repo Tool
       run: |
-        mkdir -p ~/bin
-        curl https://googleapis.com > ~/bin/repo
-        chmod a+x ~/bin/repo
-        echo "$HOME/bin" >> $GITHUB_PATH
+        mkdir -p /usr/local/bin
+        curl https://googleapis.com > /usr/local/bin/repo
+        chmod a+x /usr/local/bin/repo
 
     - name: Initialize LineageOS 13.0 Source
       run: |
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
+        git config --global --add safe.directory "*"
         mkdir android-src
         cd android-src
         repo init -u https://github.com -b cm-13.0 --git-lfs --depth=1
@@ -40,28 +50,17 @@ jobs:
     - name: Sync Minimal Build Tree
       run: |
         cd android-src
-        # Syncing only essential build platforms to save GitHub Runner space and time
+        # Targeted sync pulling down exactly the toolchains matching the 2015 compiler architecture
         repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags \
           build/make prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
 
     - name: Set Up Workspace
       run: |
-        # Link the checked-out device tree into the build structure
         mkdir -p android-src/device/huawei/
         mv device/huawei/CRO_U00 android-src/device/huawei/CRO_U00
 
     - name: Compile Boot Image / Kernel
       run: |
         cd android-src
-        source build/envsetup.sh
-        lunch lineage_CRO_U00-userdebug
-        # Target 'bootimage' forces compilation of the kernel via kernel.mk
-        make -j$(nproc --all) bootimage
-
-    - name: Upload Compiled Kernel Artifacts
-      uses: actions/artifacts@v4
-      with:
-        name: huawei-cro_u00-kernel-boot
-        path: |
-          android-src/out/target/product/CRO_U00/boot.img
-          android-src/out/target/product/CRO_U00/obj/KERNEL_OBJ/arch/arm/boot/zImage
+        # Explicit compilation handling context for older GNU Make flags (-j runtime calculation)
+        /bin/bash -c "source build/envsetup.sh && lunch lineage_CRO_U00-userdebug && make -j$(nproc --all) bootimage"
