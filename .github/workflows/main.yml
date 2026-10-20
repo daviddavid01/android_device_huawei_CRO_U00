@@ -5,62 +5,57 @@ on:
 
 jobs:
   build:
-    # Always use the latest host runner for performance and reliability
     runs-on: ubuntu-latest
-    
-    # Running directly inside an Ubuntu 16.04 container to protect older 2015 dependencies
-    container:
-      image: ubuntu:16.04
 
     steps:
-    - name: Prepare Container Environment
-      run: |
-        apt-get update && apt-get install -y git curl tar tzdata
-
+    # 1. Run modern actions on the modern host runner FIRST
     - name: Checkout Device Tree
       uses: actions/checkout@v4
       with:
         path: device/huawei/CRO_U00
 
-    - name: Install Build Dependencies
-      run: |
-        apt-get update
-        # Installs native 2015 requirements including lib32 tools, split python components, and make flags
-        apt-get install -y bc bison build-essential ccache curl flex g++-multilib \
-          gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
-          lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
-          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
-          zip zlib1g-dev python python-crypto libcrypto++-dev
-
-    - name: Install Repo Tool
-      run: |
-        mkdir -p /usr/local/bin
-        curl https://googleapis.com > /usr/local/bin/repo
-        chmod a+x /usr/local/bin/repo
-
-    - name: Initialize LineageOS 13.0 Source
+    # 2. Run your workspace synchronization out on the host
+    - name: Sync Source Tree on Host
       run: |
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
-        git config --global --add safe.directory "*"
+        
+        # Download modern repo tool for syncing
+        mkdir -p ~/bin
+        curl https://googleapis.com > ~/bin/repo
+        chmod a+x ~/bin/repo
+        export PATH="$HOME/bin:$PATH"
+        
         mkdir android-src
         cd android-src
         repo init -u https://github.com -b cm-13.0 --git-lfs --depth=1
-
-    - name: Sync Minimal Build Tree
-      run: |
-        cd android-src
-        # Targeted sync pulling down exactly the toolchains matching the 2015 compiler architecture
         repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags \
           build/make prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9
+          
+        # Move device tree into source matrix
+        mkdir -p device/huawei/
+        mv ../device/huawei/CRO_U00 device/huawei/CRO_U00
 
-    - name: Set Up Workspace
+    # 3. Pull an Ubuntu 16.04 image and mount your files into it for the 2015 compilation
+    - name: Compile 2015 Kernel inside Legacy Container
       run: |
-        mkdir -p android-src/device/huawei/
-        mv device/huawei/CRO_U00 android-src/device/huawei/CRO_U00
-
-    - name: Compile Boot Image / Kernel
-      run: |
-        cd android-src
-        # Explicit compilation handling context for older GNU Make flags (-j runtime calculation)
-        /bin/bash -c "source build/envsetup.sh && lunch lineage_CRO_U00-userdebug && make -j$(nproc --all) bootimage"
+        docker run --rm \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace/android-src \
+          ubuntu:16.04 /bin/bash -c "
+            # Set non-interactive for apt
+            export DEBIAN_FRONTEND=noninteractive
+            
+            # Install 2015 compiler dependencies inside the container
+            apt-get update && apt-get install -y \
+              bc bison build-essential ccache curl flex g++-multilib \
+              gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+              lib32z1-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
+              libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
+              zip zlib1g-dev python python-crypto libcrypto++-dev libncurses5:i386
+            
+            # Compile using legacy toolchain flags
+            source build/envsetup.sh
+            lunch lineage_CRO_U00-userdebug
+            make -j\$(nproc --all) bootimage
+          "
